@@ -18,7 +18,7 @@ import os
 import re
 import subprocess
 import typing as T
-from collections import OrderedDict
+from collections import OrderedDict, namedtuple
 
 from .. import mlog
 from .. import mesonlib
@@ -37,6 +37,7 @@ if T.TYPE_CHECKING:
     from ..environment import Environment
     from .base import ExternalProgram
 
+QtPlugin = namedtuple('QtPlugin', ['name', 'classname', 'link_args'])
 
 class GLDependencySystem(ExternalDependency):
     def __init__(self, name: str, environment, kwargs):
@@ -437,15 +438,34 @@ class QtBaseDependency(ExternalDependency):
         
         return libsline.replace('$$[QT_INSTALL_LIBS]', qvars['QT_INSTALL_LIBS']).split()
 
+    @staticmethod
+    def _get_plugin_info(specfile):
+        classname = ''
+        category = ''
+        with open(specfile) as file:
+            for line in file:
+                if 'TYPE = ' in line:
+                    category = line.split(' = ')[1].rstrip()
+                if 'CLASS_NAME = ' in line:
+                    classname = line.split(' = ')[1].rstrip()
+        return classname, category
 
     def _get_static_plugins(self, qvars):
-        plugindir = qvars['QT_INSTALL_PLUGINS']
+        self.plugins = []
+        specdir = os.path.join(qvars['QT_INSTALL_PREFIX'], 'mkspecs', 'modules')
         for plugin in self.requested_plugins:
-            category, name = os.path.split(plugin)
-            prlfile = os.path.join(plugindir, category, 'lib{}.prl'.format(name))
+            spec = os.path.join(specdir, 'qt_plugin_{}.pri'.format(plugin))
+            classname, category = self._get_plugin_info(spec)
+            
+            prlfile = os.path.join(qvars['QT_INSTALL_PLUGINS'], category, 'lib{}.prl'.format(plugin))
+            lib = os.path.join(qvars['QT_INSTALL_PLUGINS'], category, 'lib{}.a'.format(plugin))
             args = self._link_args_from_prl(qvars, prlfile)
+
+            p = QtPlugin(plugin, classname, args)
+            self.plugins.append(p)
+
+            self.link_args.append(lib)
             self.link_args.extend(args)
-                
 
 
     def _get_modules_lib_suffix(self, is_debug):
