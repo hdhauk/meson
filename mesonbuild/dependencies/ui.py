@@ -197,6 +197,9 @@ class QtBaseDependency(ExternalDependency):
         self.requested_modules = mods
         if not mods:
             raise DependencyException('No ' + self.qtname + '  modules specified.')
+        self.requested_plugins = extract_as_list(kwargs, 'plugins')
+        if self.static and not self.requested_plugins:
+            raise DependencyException('No {} plugins specified for static build.'.format(self.qtname))
         self.from_text = 'pkg-config'
 
         self.qtmain = kwargs.get('main', False)
@@ -362,6 +365,7 @@ class QtBaseDependency(ExternalDependency):
                 continue
             (k, v) = tuple(line.split(':', 1))
             qvars[k] = v
+        self.qvars = qvars
         # Qt on macOS uses a framework, but Qt for iOS/tvOS does not
         xspec = qvars.get('QMAKE_XSPEC', '')
         if self.env.machines.host.is_darwin() and not any(s in xspec for s in ['ios', 'tvos']):
@@ -421,7 +425,29 @@ class QtBaseDependency(ExternalDependency):
             if not self._link_with_qtmain(is_debug, libdir):
                 self.is_found = False
 
+        if self.static and self.requested_plugins:
+            self._get_static_plugins()
+
         return self.qmake.name
+
+    def _link_args_from_prl(self, prlfile):
+        with open(prlfile) as prl:
+            for line in prl:
+                if line.startswith('QMAKE_PRL_LIBS = '):
+                    libsline = line.rstrip()[17:] # cut off QMAKE_PRL_LIBS part
+        
+        return libsline.replace('$$[QT_INSTALL_LIBS]', self.qvars['QT_INSTALL_LIBS']).split()
+
+
+    def _get_static_plugins(self):
+        plugindir = self.qvars['QT_INSTALL_PLUGINS']
+        for plugin in self.requested_plugins:
+            category, name = os.path.split(plugin)
+            prlfile = os.path.join(plugindir, category, 'lib{}.prl'.format(name))
+            args = self._link_args_from_prl(prlfile)
+            self.link_args.extend(args)
+                
+
 
     def _get_modules_lib_suffix(self, is_debug):
         suffix = ''
