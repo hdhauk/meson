@@ -365,7 +365,6 @@ class QtBaseDependency(ExternalDependency):
                 continue
             (k, v) = tuple(line.split(':', 1))
             qvars[k] = v
-        self.qvars = qvars
         # Qt on macOS uses a framework, but Qt for iOS/tvOS does not
         xspec = qvars.get('QMAKE_XSPEC', '')
         if self.env.machines.host.is_darwin() and not any(s in xspec for s in ['ios', 'tvos']):
@@ -426,25 +425,25 @@ class QtBaseDependency(ExternalDependency):
                 self.is_found = False
 
         if self.static and self.requested_plugins:
-            self._get_static_plugins()
+            self._get_static_plugins(qvars)
 
         return self.qmake.name
 
-    def _link_args_from_prl(self, prlfile):
+    def _link_args_from_prl(self, qvars, prlfile):
         with open(prlfile) as prl:
             for line in prl:
                 if line.startswith('QMAKE_PRL_LIBS = '):
                     libsline = line.rstrip()[17:] # cut off QMAKE_PRL_LIBS part
         
-        return libsline.replace('$$[QT_INSTALL_LIBS]', self.qvars['QT_INSTALL_LIBS']).split()
+        return libsline.replace('$$[QT_INSTALL_LIBS]', qvars['QT_INSTALL_LIBS']).split()
 
 
-    def _get_static_plugins(self):
-        plugindir = self.qvars['QT_INSTALL_PLUGINS']
+    def _get_static_plugins(self, qvars):
+        plugindir = qvars['QT_INSTALL_PLUGINS']
         for plugin in self.requested_plugins:
             category, name = os.path.split(plugin)
             prlfile = os.path.join(plugindir, category, 'lib{}.prl'.format(name))
-            args = self._link_args_from_prl(prlfile)
+            args = self._link_args_from_prl(qvars, prlfile)
             self.link_args.extend(args)
                 
 
