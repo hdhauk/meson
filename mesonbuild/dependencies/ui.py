@@ -431,6 +431,7 @@ class QtBaseDependency(ExternalDependency):
                 self._setup_static_plugins(qvars)
             if self.qmlfiles:
                 self._setup_static_qml_plugins(qvars)
+            self._simplify_link_args()
 
         return self.qmake.name
 
@@ -516,6 +517,13 @@ class QtBaseDependency(ExternalDependency):
         self._generate_plugin_import(plugins.values(), qml_plugin_importer)
         self.sources.append(File(is_built=True, subdir='', fname=qml_plugin_importer))
 
+    def _simplify_link_args(self):
+        uniq = list(set(self.link_args))
+        plugins = [x for x in uniq if '/plugins/' in x or '/qml' in x]
+        qlibs = [x for x in uniq if '/lib/' in x]
+        remainder = [x for x in uniq if x not in plugins and x not in qlibs]
+        new = plugins + qlibs + remainder
+        self.link_args = new
 
     def _get_modules_lib_suffix(self, is_debug):
         suffix = ''
