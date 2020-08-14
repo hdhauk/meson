@@ -14,6 +14,7 @@
 
 # This file contains the detection logic for external dependencies that
 # are UI-related.
+import json
 import os
 import re
 import subprocess
@@ -23,7 +24,7 @@ from collections import OrderedDict, namedtuple
 from .. import mlog
 from .. import mesonlib
 from ..mesonlib import (
-    MesonException, Popen_safe, extract_as_list, version_compare_many
+    MesonException, Popen_safe, extract_as_list, version_compare_many, File
 )
 from ..environment import detect_cpu_family
 
@@ -199,9 +200,9 @@ class QtBaseDependency(ExternalDependency):
         if not mods:
             raise DependencyException('No ' + self.qtname + '  modules specified.')
         self.requested_plugins = extract_as_list(kwargs, 'plugins')
-        if self.static and not self.requested_plugins:
-            raise DependencyException('No {} plugins specified for static build.'.format(self.qtname))
+        self.qmlfiles = extract_as_list(kwargs, 'qmlfiles')        
         self.from_text = 'pkg-config'
+        self.scratch_dir = env.scratch_dir
 
         self.qtmain = kwargs.get('main', False)
         if not isinstance(self.qtmain, bool):
@@ -227,7 +228,7 @@ class QtBaseDependency(ExternalDependency):
             self.version = None
 
     def compilers_detect(self, interp_obj):
-        "Detect Qt (4 or 5) moc, uic, rcc in the specified bindir or in PATH"
+        "Detect Qt (4 or 5) moc, uic, rcc, lrelease in the specified bindir or in PATH"
         # It is important that this list does not change order as the order of
         # the returned ExternalPrograms will change as well
         bins = ['moc', 'uic', 'rcc', 'lrelease']
@@ -425,18 +426,22 @@ class QtBaseDependency(ExternalDependency):
             if not self._link_with_qtmain(is_debug, libdir):
                 self.is_found = False
 
-        if self.static and self.requested_plugins:
-            self._get_static_plugins(qvars)
+        if self.static:
+            if self.requested_plugins:
+                self._setup_static_plugins(qvars)
+            if self.qmlfiles:
+                self._setup_static_qml_plugins(qvars)
 
         return self.qmake.name
 
-    def _link_args_from_prl(self, qvars, prlfile):
+    @staticmethod
+    def get_link_args_from_prl(prlfile, qt_libdir):
         with open(prlfile) as prl:
             for line in prl:
                 if line.startswith('QMAKE_PRL_LIBS = '):
                     libsline = line.rstrip()[17:] # cut off QMAKE_PRL_LIBS part
         
-        return libsline.replace('$$[QT_INSTALL_LIBS]', qvars['QT_INSTALL_LIBS']).split()
+        return libsline.replace('$$[QT_INSTALL_LIBS]', qt_libdir).split()
 
     @staticmethod
     def _get_plugin_info(specfile):
@@ -450,7 +455,14 @@ class QtBaseDependency(ExternalDependency):
                     classname = line.split(' = ')[1].rstrip()
         return classname, category
 
-    def _get_static_plugins(self, qvars):
+    @staticmethod
+    def _generate_plugin_import(plugins, dest):
+        with open(dest, 'w') as file:
+            file.write('#include <QtPlugin>\n\n')
+            for plugin in plugins:
+                file.write('Q_IMPORT_PLUGIN({})\n'.format(plugin.classname))
+
+    def _setup_static_plugins(self, qvars):
         self.plugins = []
         specdir = os.path.join(qvars['QT_INSTALL_PREFIX'], 'mkspecs', 'modules')
         for plugin in self.requested_plugins:
@@ -459,13 +471,50 @@ class QtBaseDependency(ExternalDependency):
             
             prlfile = os.path.join(qvars['QT_INSTALL_PLUGINS'], category, 'lib{}.prl'.format(plugin))
             lib = os.path.join(qvars['QT_INSTALL_PLUGINS'], category, 'lib{}.a'.format(plugin))
-            args = self._link_args_from_prl(qvars, prlfile)
+            args = self.get_link_args_from_prl(prlfile, qvars['QT_INSTALL_LIBS'])
 
             p = QtPlugin(plugin, classname, args)
             self.plugins.append(p)
 
             self.link_args.append(lib)
             self.link_args.extend(args)
+
+        plugin_importer = os.path.join(self.scratch_dir, 'qt_plugin_importer.cpp')
+        self._generate_plugin_import(self.plugins, plugin_importer)
+        self.sources.append(File(is_built=True, subdir='', fname=plugin_importer))
+    
+    def _setup_static_qml_plugins(self, qvars):
+        # check for qmlimportscanner
+        scanner = os.path.join(qvars['QT_HOST_BINS'], 'qmlimportscanner')
+        if not os.path.isfile(scanner) or not os.access(scanner, os.X_OK):
+            raise DependencyException('could not find qmlimportscanner')
+
+
+        qmldir = qvars['QT_INSTALL_QML']
+        cmd = [scanner, '-qmlFiles'] + self.qmlfiles + ['-importPath', qmldir]
+        _, out, err = Popen_safe(cmd)
+        imports = json.loads(out)
+
+        plugins = {}
+        for i in imports:
+            if {'classname', 'path', 'plugin'} <= i.keys():
+                name = i['plugin']
+                if name in plugins:
+                    continue
+
+                path = i['path']
+                prlfile = os.path.join(path, "lib{}.prl".format(name))
+                archive = os.path.join(path, "lib{}.a".format(name))
+                args = self.get_link_args_from_prl(prlfile, qvars['QT_INSTALL_LIBS'])
+
+                self.link_args.append(archive)
+                self.link_args.extend(args)
+
+                plugins[name] = QtPlugin(name, i['classname'], [archive] + args)
+
+        qml_plugin_importer = os.path.join(self.scratch_dir, 'qt_qml_plugin_importer.cpp')
+        self._generate_plugin_import(plugins.values(), qml_plugin_importer)
+        self.sources.append(File(is_built=True, subdir='', fname=qml_plugin_importer))
 
 
     def _get_modules_lib_suffix(self, is_debug):
